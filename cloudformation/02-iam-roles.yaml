@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Roles and Policies for Big Data Processing - MWAA, EMR, and S3 Access with Least Privilege'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: big-data-processing
+    Description: Project name for resource naming
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  DataBucketName:
+    Type: String
+    Description: Name of the S3 bucket for data storage
+  
+  ProcessedDataBucketName:
+    Type: String
+    Default: ''
+    Description: (Optional) Name of the S3 bucket for processed data. If empty, processed data goes to DataBucketName
+
+Resources:
+  # ============================================
+  # MWAA Execution Role
+  # ============================================
+  MWAAExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-mwaa-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - airflow-env.amazonaws.com
+                - airflow.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-mwaa-execution-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  MWAAExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-mwaa-execution-policy'
+      Roles:
+        - !Ref MWAAExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Access for DAGs, plugins, requirements
+          - Sid: S3BucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${DataBucketName}'
+              - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+          
+          # S3 Access to processed data bucket (if provided separately)
+          - Sid: S3ProcessedDataBucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${ProcessedDataBucketName}'
+              - !Sub 'arn:aws:s3:::${ProcessedDataBucketName}/*'
+            Condition:
+              StringNotEquals:
+                aws:username: ''  # Only apply if ProcessedDataBucketName is not empty
+          
+          # CloudWatch Logs
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+              - logs:GetLogEvents
+              - logs:GetLogRecord
+              - logs:GetLogGroupFields
+              - logs:GetQueryResults
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-${ProjectName}-${Environment}-*'
+          
+          # CloudWatch Metrics
+          - Sid: CloudWatchMetrics
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: '*'
+          
+          # EMR Cluster Management
+          - Sid: EMRClusterManagement
+            Effect: Allow
+            Action:
+              - elasticmapreduce:RunJobFlow
+              - elasticmapreduce:DescribeCluster
+              - elasticmapreduce:ListInstances
+              - elasticmapreduce:TerminateJobFlows
+              - elasticmapreduce:AddJobFlowSteps
+              - elasticmapreduce:ListSteps
+              - elasticmapreduce:DescribeStep
+              - elasticmapreduce:CancelSteps
+              - elasticmapreduce:ListClusters
+              - elasticmapreduce:AddTags
+            Resource:
+              - !Sub 'arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:cluster/*'
+              - !Sub 'arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:editor/*'
+          
+          # IAM Pass Role for EMR
+          - Sid: IAMPassRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !GetAtt EMRServiceRole.Arn
+              - !GetAtt EMREC2Role.Arn
+            Condition:
+              StringLike:
+                iam:PassedToService: elasticmapreduce.amazonaws.com
+          
+          # EC2 for EMR networking
+          - Sid: EC2ForEMR
+            Effect: Allow
+            Action:
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+            Resource: '*'
+          
+          # SQS for Airflow internal communication
+          - Sid: SQSAccess
+            Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource:
+              - !Sub 'arn:aws:sqs:${AWS::Region}:*:airflow-celery-*'
+          
+          # KMS for encryption
+          - Sid: KMSAccess
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey*
+              - kms:Encrypt
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+            Condition:
+              StringEquals:
+                kms:ViaService:
+                  - !Sub 's3.${AWS::Region}.amazonaws.com'
+                  - !Sub 'sqs.${AWS::Region}.amazonaws.com'
+
+  # ============================================
+  # EMR Service Role
+  # ============================================
+  EMRServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-emr-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-emr-service-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # EMR EC2 Instance Profile Role
+  # ============================================
+  EMREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-emr-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-emr-ec2-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  EMREC2Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-emr-ec2-policy'
+      Roles:
+        - !Ref EMREC2Role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Access for data processing
+          - Sid: S3DataAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${DataBucketName}'
+              - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+          
+          # S3 Access to processed data bucket (if provided separately)
+          - Sid: S3ProcessedDataAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${ProcessedDataBucketName}'
+              - !Sub 'arn:aws:s3:::${ProcessedDataBucketName}/*'
+            Condition:
+              StringNotEquals:
+                aws:username: ''  # Only apply if ProcessedDataBucketName is not empty
+          
+          # S3 List bucket access
+          - Sid: S3ListBuckets
+            Effect: Allow
+            Action:
+              - s3:ListAllMyBuckets
+              - s3:GetBucketLocation
+            Resource: '*'
+          
+          # CloudWatch Metrics and Logs
+          - Sid: CloudWatchAccess
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource: '*'
+          
+          # EC2 Instance Metadata
+          - Sid: EC2Metadata
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeTags
+            Resource: '*'
+          
+          # Glue Catalog (if using Hive metastore)
+          - Sid: GlueCatalog
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:CreateTable
+              - glue:UpdateTable
+              - glue:DeleteTable
+              - glue:CreatePartition
+              - glue:UpdatePartition
+              - glue:DeletePartition
+              - glue:BatchCreatePartition
+              - glue:BatchDeletePartition
+            Resource:
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ProjectName}_*'
+              - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}_*/*'
+
+  EMREC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-${Environment}-emr-ec2-instance-profile'
+      Roles:
+        - !Ref EMREC2Role
+
+  # ============================================
+  # Lambda Execution Role (for future automation)
+  # ============================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-lambda-execution-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-lambda-execution-policy'
+      Roles:
+        - !Ref LambdaExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3Access
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${DataBucketName}'
+              - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+          
+          - Sid: MWAAEnvironmentAccess
+            Effect: Allow
+            Action:
+              - airflow:PublishMetrics
+              - airflow:CreateCliToken
+            Resource:
+              - !Sub 'arn:aws:airflow:${AWS::Region}:${AWS::AccountId}:environment/${ProjectName}-${Environment}'
+
+Outputs:
+  MWAAExecutionRoleArn:
+    Description: ARN of MWAA Execution Role
+    Value: !GetAtt MWAAExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAAExecutionRoleArn'
+
+  EMRServiceRoleArn:
+    Description: ARN of EMR Service Role
+    Value: !GetAtt EMRServiceRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMRServiceRoleArn'
+
+  EMREC2RoleArn:
+    Description: ARN of EMR EC2 Role
+    Value: !GetAtt EMREC2Role.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMREC2RoleArn'
+
+  EMREC2InstanceProfileArn:
+    Description: ARN of EMR EC2 Instance Profile
+    Value: !GetAtt EMREC2InstanceProfile.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMREC2InstanceProfileArn'
+
+  EMREC2InstanceProfileName:
+    Description: Name of EMR EC2 Instance Profile
+    Value: !Ref EMREC2InstanceProfile
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMREC2InstanceProfileName'
+
+  LambdaExecutionRoleArn:
+    Description: ARN of Lambda Execution Role
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-LambdaExecutionRoleArn'

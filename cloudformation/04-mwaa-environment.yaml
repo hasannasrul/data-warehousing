@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS MWAA (Managed Workflows for Apache Airflow) Environment - Private Web Server in VPC'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: big-data-processing
+    Description: Project name for resource naming
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  MWAAEnvironmentClass:
+    Type: String
+    Default: mw1.small
+    AllowedValues:
+      - mw1.small
+      - mw1.medium
+      - mw1.large
+    Description: MWAA environment class (size)
+  
+  MaxWorkers:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 25
+    Description: Maximum number of Airflow workers
+  
+  MinWorkers:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 25
+    Description: Minimum number of Airflow workers
+  
+  AirflowVersion:
+    Type: String
+    Default: '2.7.2'
+    AllowedValues:
+      - '2.7.2'
+      - '2.6.3'
+      - '2.5.1'
+    Description: Apache Airflow version
+  
+  WebserverAccessMode:
+    Type: String
+    Default: PRIVATE_ONLY
+    AllowedValues:
+      - PRIVATE_ONLY
+      - PUBLIC_ONLY
+    Description: Web server access mode
+
+Resources:
+  # ============================================
+  # MWAA Environment
+  # ============================================
+  MWAAEnvironment:
+    Type: AWS::MWAA::Environment
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}'
+      
+      # Airflow Configuration
+      AirflowVersion: !Ref AirflowVersion
+      EnvironmentClass: !Ref MWAAEnvironmentClass
+      MaxWorkers: !Ref MaxWorkers
+      MinWorkers: !Ref MinWorkers
+      
+      # IAM Role
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-MWAAExecutionRoleArn'
+      
+      # S3 Configuration
+      SourceBucketArn:
+        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-MWAABucketArn'
+      DagS3Path: dags
+      PluginsS3Path: plugins.zip
+      RequirementsS3Path: requirements.txt
+      
+      # Networking Configuration
+      NetworkConfiguration:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-MWAASecurityGroup'
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet1'
+          - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-PrivateSubnet2'
+      
+      # Web Server Configuration
+      WebserverAccessMode: !Ref WebserverAccessMode
+      
+      # Logging Configuration
+      LoggingConfiguration:
+        DagProcessingLogs:
+          Enabled: true
+          LogLevel: INFO
+        SchedulerLogs:
+          Enabled: true
+          LogLevel: INFO
+        TaskLogs:
+          Enabled: true
+          LogLevel: INFO
+        WebserverLogs:
+          Enabled: true
+          LogLevel: INFO
+        WorkerLogs:
+          Enabled: true
+          LogLevel: INFO
+      
+      # Airflow Configuration Options
+      AirflowConfigurationOptions:
+        # Core configurations
+        core.default_timezone: utc
+        core.load_examples: 'False'
+        core.lazy_load_plugins: 'True'
+        
+        # Scheduler configurations
+        scheduler.catchup_by_default: 'False'
+        scheduler.dag_dir_list_interval: '300'
+        scheduler.parsing_processes: '2'
+        
+        # Web server configurations
+        webserver.expose_config: 'False'
+        webserver.instance_name: !Sub '${ProjectName}-${Environment}'
+        
+        # Email configurations (optional - configure if needed)
+        # email.email_backend: airflow.providers.amazon.aws.utils.emailer.send_email
+        # email.email_conn_id: aws_default
+        
+        # Celery configurations
+        celery.worker_autoscale: '4,2'
+        
+        # Logging
+        logging.remote_logging: 'True'
+        logging.remote_base_log_folder: !Sub 's3://${MWAABucketName}/logs'
+        logging.remote_log_conn_id: aws_default
+      
+      # Environment Variables
+      # These will be available in Airflow as environment variables
+      # Access in DAGs via: os.environ.get('VARIABLE_NAME')
+      Tags:
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+        ManagedBy: CloudFormation
+
+  # ============================================
+  # CloudWatch Log Groups (created automatically by MWAA but defined for reference)
+  # ============================================
+  MWAALogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/mwaa/${ProjectName}-${Environment}'
+      RetentionInDays: 7
+
+  # ============================================
+  # SNS Topic for MWAA Alerts (Optional)
+  # ============================================
+  MWAAAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-mwaa-alerts'
+      DisplayName: MWAA Environment Alerts
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Alarm for MWAA Environment Health
+  MWAAEnvironmentHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-mwaa-unhealthy'
+      AlarmDescription: Alert when MWAA environment is unhealthy
+      MetricName: EnvironmentHealth
+      Namespace: AWS/MWAA
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0.5
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref MWAAEnvironment
+      AlarmActions:
+        - !Ref MWAAAlertTopic
+      TreatMissingData: breaching
+
+  # CloudWatch Alarm for Task Failures
+  MWAATaskFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-mwaa-task-failures'
+      AlarmDescription: Alert when Airflow tasks are failing
+      MetricName: TasksFailed
+      Namespace: AWS/MWAA
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref MWAAEnvironment
+      AlarmActions:
+        - !Ref MWAAAlertTopic
+      TreatMissingData: notBreaching
+
+Outputs:
+  MWAAEnvironmentName:
+    Description: Name of the MWAA environment
+    Value: !Ref MWAAEnvironment
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAAEnvironmentName'
+
+  MWAAEnvironmentArn:
+    Description: ARN of the MWAA environment
+    Value: !GetAtt MWAAEnvironment.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAAEnvironmentArn'
+
+  MWAAWebserverUrl:
+    Description: URL of the MWAA web server
+    Value: !GetAtt MWAAEnvironment.WebserverUrl
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAAWebserverUrl'
+
+  MWAALogGroupName:
+    Description: CloudWatch Log Group for MWAA
+    Value: !Ref MWAALogGroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAALogGroupName'
+
+  MWAAAlertTopicArn:
+    Description: SNS Topic ARN for MWAA alerts
+    Value: !Ref MWAAAlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAAAlertTopicArn'
+
+  MWAABucketName:
+    Description: MWAA S3 Bucket Name
+    Value:
+      Fn::ImportValue: !Sub '${ProjectName}-${Environment}-MWAABucketName'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAABucket'

@@ -1,0 +1,90 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      separate_buckets:
+        description: 'Use separate processed data bucket'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    environment: 
+      name: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+          aws-region: us-east-1
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install boto3 botocore
+      
+      - name: Create deployment approval issue
+        run: |
+          echo "Production deployment requires manual approval"
+          echo "Separate buckets: ${{ github.event.inputs.separate_buckets }}"
+      
+      - name: Validate CloudFormation templates
+        run: |
+          for template in cloudformation/*.yaml; do
+            echo "Validating $template"
+            aws cloudformation validate-template --template-body file://$template --region us-east-1
+          done
+      
+      - name: Deploy CloudFormation stacks (Prod)
+        env:
+          ENVIRONMENT: prod
+          SEPARATE_BUCKETS: ${{ github.event.inputs.separate_buckets }}
+        run: |
+          cd scripts
+          chmod +x deploy-infrastructure.sh
+          ./deploy-infrastructure.sh $ENVIRONMENT us-east-1 $SEPARATE_BUCKETS
+      
+      - name: Verify production deployment
+        env:
+          ENVIRONMENT: prod
+        run: |
+          echo "Verifying production resources..."
+          aws s3 ls | grep big-data-processing-$ENVIRONMENT
+          aws iam list-roles | grep big-data-processing-$ENVIRONMENT
+          aws mwaa list-environments | grep big-data-processing-$ENVIRONMENT || echo "MWAA initializing"
+      
+      - name: Create deployment tags
+        run: |
+          git tag deployment/prod-$(date +%Y%m%d-%H%M%S)
+        continue-on-error: true
+      
+      - name: Send deployment notification
+        if: always()
+        run: |
+          echo "Deployment to production completed"
+          echo "Environment: prod"
+          echo "Commit: ${{ github.sha }}"
+          echo "Time: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      
+      - name: Upload deployment log
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: prod-deployment-log
+          path: |
+            config/aws-infrastructure.env

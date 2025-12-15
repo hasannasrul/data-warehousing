@@ -1,0 +1,42 @@
+name: CloudFormation Lint
+
+on:
+  push:
+    paths:
+      - 'cloudformation/**'
+    branches: [ main, develop ]
+  pull_request:
+    paths:
+      - 'cloudformation/**'
+    branches: [ main, develop ]
+
+jobs:
+  cloudformation-lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install cfn-lint
+        run: |
+          python -m pip install --upgrade pip
+          pip install cfn-lint
+      
+      - name: Lint CloudFormation templates
+        run: |
+          cfn-lint cloudformation/*.yaml -t
+      
+      - name: Validate CloudFormation templates with AWS CLI
+        run: |
+          for template in cloudformation/*.yaml; do
+            echo "Validating $template"
+            aws cloudformation validate-template --template-body file://$template --region us-east-1 2>/dev/null || echo "Skipping AWS validation (no credentials in CI)"
+          done
+        continue-on-error: true
+        env:
+          AWS_DEFAULT_REGION: us-east-1

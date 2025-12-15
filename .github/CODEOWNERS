@@ -1,0 +1,27 @@
+# GitHub CODEOWNERS
+# This file defines code ownership for the repository
+
+# Default - requires review from repository owner
+* @
+
+# CloudFormation templates - DevOps team
+/cloudformation/ @
+
+# Airflow DAGs - Data Engineering team
+/dags/ @
+
+# Spark jobs - Data Engineering team
+/scripts/spark_processing.py @
+
+# Infrastructure scripts - DevOps team
+/scripts/deploy-infrastructure.sh @
+/scripts/destroy-infrastructure.sh @
+/scripts/upload-to-mwaa.sh @
+
+# Documentation
+/README.md @
+/MWAA-SETUP.md @
+/QUICKSTART.md @
+
+# Workflow configurations
+/.github/workflows/ @

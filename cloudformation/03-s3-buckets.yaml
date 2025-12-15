@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'S3 Buckets for Big Data Processing - Data Storage, MWAA, EMR Logs with Encryption and Lifecycle'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: big-data-processing
+    Description: Project name for resource naming
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  DataRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Number of days to retain processed data before archiving to Glacier
+  
+  UseSeparateProcessedBucket:
+    Type: String
+    Default: 'no'
+    AllowedValues:
+      - 'yes'
+      - 'no'
+    Description: Create a separate bucket for processed data (yes/no). If yes, processed data goes to a dedicated bucket. If no, all data stays in main data bucket.
+
+Resources:
+  # ============================================
+  # Main Data Bucket
+  # ============================================
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-data-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Archive raw data to Glacier after 90 days
+          - Id: ArchiveRawData
+            Status: Enabled
+            Prefix: raw-data/
+            Transitions:
+              - TransitionInDays: !Ref DataRetentionDays
+                StorageClass: GLACIER
+            NoncurrentVersionExpirationInDays: 30
+          
+          # Delete temporary files after 7 days
+          - Id: DeleteTempFiles
+            Status: Enabled
+            Prefix: temp/
+            ExpirationInDays: 7
+          
+          # Archive processed data after 180 days
+          - Id: ArchiveProcessedData
+            Status: Enabled
+            Prefix: processed-data/
+            Transitions:
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+          
+          # Delete incomplete multipart uploads after 7 days
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-data-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Data Storage
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Deny unencrypted object uploads
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${DataBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+          
+          # Deny insecure transport
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub '${DataBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ============================================
+  # MWAA Environment Bucket
+  # ============================================
+  MWAABucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-mwaa-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Delete old non-current versions after 30 days
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          
+          # Clean up incomplete multipart uploads
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-mwaa-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: MWAA Storage
+
+  MWAABucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MWAABucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Deny unencrypted object uploads
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${MWAABucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+          
+          # Deny insecure transport
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt MWAABucket.Arn
+              - !Sub '${MWAABucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ============================================
+  # EMR Logs Bucket
+  # ============================================
+  EMRLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-emr-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Delete logs after 30 days
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 30
+          
+          # Archive logs to Glacier after 14 days
+          - Id: ArchiveLogs
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 14
+                StorageClass: GLACIER_IR
+          
+          # Clean up incomplete multipart uploads
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-emr-logs-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: EMR Logs
+
+  EMRLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EMRLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow EMR to write logs
+          - Sid: EMRLogDelivery
+            Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource: !Sub '${EMRLogsBucket.Arn}/*'
+          
+          # Deny insecure transport
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt EMRLogsBucket.Arn
+              - !Sub '${EMRLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ============================================
+  # Separate Processed Data Bucket (Optional)
+  # ============================================
+  ProcessedDataBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateProcessedDataBucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-processed-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Archive processed data after 180 days
+          - Id: ArchiveProcessedData
+            Status: Enabled
+            Prefix: ''
+            Transitions:
+              - TransitionInDays: 180
+                StorageClass: GLACIER_IR
+          
+          # Delete old versions after 30 days
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          
+          # Clean up incomplete multipart uploads
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-processed-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Processed Data Storage
+
+  ProcessedDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateProcessedDataBucket
+    Properties:
+      Bucket: !Ref ProcessedDataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Deny unencrypted object uploads
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${ProcessedDataBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+          
+          # Deny insecure transport
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ProcessedDataBucket.Arn
+              - !Sub '${ProcessedDataBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ============================================
+  # Athena Query Results Bucket (Optional)
+  # ============================================
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-athena-results-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Delete query results after 7 days
+          - Id: DeleteQueryResults
+            Status: Enabled
+            ExpirationInDays: 7
+          
+          # Clean up incomplete multipart uploads
+          - Id: CleanupIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-athena-results'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Athena Query Results
+
+Conditions:
+  CreateProcessedDataBucket: !Equals [!Ref UseSeparateProcessedBucket, 'yes']
+
+Outputs:
+  DataBucketName:
+    Description: Name of the main data bucket
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DataBucketName'
+
+  DataBucketArn:
+    Description: ARN of the main data bucket
+    Value: !GetAtt DataBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DataBucketArn'
+
+  MWAABucketName:
+    Description: Name of the MWAA bucket
+    Value: !Ref MWAABucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAABucketName'
+
+  MWAABucketArn:
+    Description: ARN of the MWAA bucket
+    Value: !GetAtt MWAABucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-MWAABucketArn'
+
+  EMRLogsBucketName:
+    Description: Name of the EMR logs bucket
+    Value: !Ref EMRLogsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMRLogsBucketName'
+
+  EMRLogsBucketArn:
+    Description: ARN of the EMR logs bucket
+    Value: !GetAtt EMRLogsBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-EMRLogsBucketArn'
+
+  AthenaResultsBucketName:
+    Description: Name of the Athena results bucket
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AthenaResultsBucketName'
+
+  AthenaResultsBucketArn:
+    Description: ARN of the Athena results bucket
+    Value: !GetAtt AthenaResultsBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AthenaResultsBucketArn'
+
+  ProcessedDataBucketName:
+    Description: Name of the processed data bucket (if separate bucket enabled)
+    Condition: CreateProcessedDataBucket
+    Value: !Ref ProcessedDataBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ProcessedDataBucketName'
+
+  ProcessedDataBucketArn:
+    Description: ARN of the processed data bucket (if separate bucket enabled)
+    Condition: CreateProcessedDataBucket
+    Value: !GetAtt ProcessedDataBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ProcessedDataBucketArn'
+
+  UseSeparateProcessedBucketFlag:
+    Description: Whether separate processed data bucket is enabled
+    Value: !Ref UseSeparateProcessedBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-UseSeparateProcessedBucket'

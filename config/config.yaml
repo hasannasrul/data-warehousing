@@ -1,0 +1,147 @@
+# Big Data Processing Configuration
+
+# AWS Configuration
+aws:
+  region: us-east-1
+  profile: default  # AWS CLI profile name
+
+# S3 Configuration
+s3:
+  # Data buckets
+  data_bucket: your-data-bucket-name  # Main data bucket (raw input)
+  use_separate_processed_bucket: false  # Set to true to use separate bucket for processed data
+  processed_bucket: your-processed-bucket-name  # Only needed if use_separate_processed_bucket is true
+  
+  # Bucket prefixes (paths within buckets)
+  input_prefix: raw-data/
+  output_prefix: processed-data/
+  scripts_prefix: scripts/
+  logs_prefix: logs/
+
+# EMR Configuration
+emr:
+  cluster_name: BigDataProcessingCluster
+  release_label: emr-6.15.0
+  log_uri: s3://your-bucket-name/emr-logs/
+  
+  # EC2 Configuration
+  ec2_key_name: your-key-pair  # Replace with your EC2 key pair name
+  subnet_id: null  # Optional: specify subnet ID
+  
+  # Master Node Configuration
+  master:
+    instance_type: m5.xlarge
+    instance_count: 1
+    market: ON_DEMAND
+  
+  # Core (Worker) Nodes Configuration
+  core:
+    instance_type: m5.xlarge
+    instance_count: 2
+    market: SPOT
+    ebs_size: 100  # GB
+  
+  # IAM Roles
+  service_role: EMR_DefaultRole
+  job_flow_role: EMR_EC2_DefaultRole
+  
+  # Applications to install
+  applications:
+    - Spark
+    - Hadoop
+    - Hive
+    - Pig
+    - Tez
+
+# Spark Configuration
+spark:
+  deploy_mode: cluster
+  driver_memory: 4g
+  executor_memory: 4g
+  executor_cores: 2
+  max_executors: 10
+  
+  # Spark Configurations
+  conf:
+    spark.sql.adaptive.enabled: true
+    spark.sql.adaptive.coalescePartitions.enabled: true
+    spark.dynamicAllocation.enabled: true
+    spark.dynamicAllocation.minExecutors: 1
+    spark.dynamicAllocation.maxExecutors: 10
+    spark.sql.shuffle.partitions: 200
+
+# Data Processing Configuration
+processing:
+  input_format: parquet  # parquet, csv, json
+  output_format: parquet  # parquet, csv, json
+  partition_columns:
+    - year
+    - month
+  compression: snappy
+  
+# Airflow Configuration
+airflow:
+  schedule_interval: '@daily'  # cron expression or preset
+  start_date: 2025-01-01
+  catchup: false
+  max_active_runs: 1
+  
+  # Task Configuration
+  task_retries: 2
+  retry_delay_minutes: 5
+  execution_timeout_minutes: 120
+  
+  # Email Configuration
+  email_on_failure: false
+  email_on_retry: false
+  email_recipients:
+    - data-engineering@example.com
+
+# Monitoring and Alerting
+monitoring:
+  enable_cloudwatch: true
+  enable_sns_notifications: false
+  sns_topic_arn: null  # arn:aws:sns:region:account-id:topic-name
+  
+# Data Quality Checks
+data_quality:
+  enable_validation: true
+  min_row_count: 100
+  max_null_percentage: 10
+  required_columns: []
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  
+# Environment-specific configurations
+environments:
+  development:
+    s3:
+      bucket: dev-your-bucket-name
+    emr:
+      master:
+        instance_type: m5.large
+      core:
+        instance_count: 1
+  
+  staging:
+    s3:
+      bucket: staging-your-bucket-name
+    emr:
+      master:
+        instance_type: m5.xlarge
+      core:
+        instance_count: 2
+  
+  production:
+    s3:
+      bucket: prod-your-bucket-name
+    emr:
+      master:
+        instance_type: m5.2xlarge
+      core:
+        instance_count: 4
+    monitoring:
+      enable_sns_notifications: true

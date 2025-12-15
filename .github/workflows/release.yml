@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install build twine
+      
+      - name: Extract version from tag
+        id: tag_name
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+      
+      - name: Create release notes
+        run: |
+          cat > RELEASE_NOTES.md << 'EOF'
+          # Release ${{ steps.tag_name.outputs.VERSION }}
+          
+          **Date**: $(date -u +'%Y-%m-%d')
+          
+          ## What's New
+          
+          - Infrastructure as Code with CloudFormation
+          - AWS MWAA support for managed Airflow
+          - Private VPC deployment with security best practices
+          - Flexible S3 bucket configuration (single or separate buckets)
+          - CI/CD pipeline with GitHub Actions
+          
+          ## Installation
+          
+          ```bash
+          git clone https://github.com/your-username/big-data-processing.git
+          cd big-data-processing
+          git checkout v${{ steps.tag_name.outputs.VERSION }}
+          ```
+          
+          ## Deployment
+          
+          ```bash
+          cd scripts
+          ./deploy-infrastructure.sh dev us-east-1 no
+          ```
+          
+          See [README.md](README.md) for detailed documentation.
+          
+          EOF
+          cat RELEASE_NOTES.md
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ steps.tag_name.outputs.VERSION }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+      
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            README.md
+            QUICKSTART.md
+            MWAA-SETUP.md
+            requirements.txt
+          body_path: RELEASE_NOTES.md
