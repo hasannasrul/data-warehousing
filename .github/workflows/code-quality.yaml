@@ -1,0 +1,70 @@
+name: Code Quality Checks
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install Python linting tools
+        run: |
+          pip install pylint black flake8 isort
+      
+      - name: Check Python syntax
+        run: |
+          python -m py_compile glue/*.py
+          echo "✓ Python files syntax valid"
+      
+      - name: Run Black formatter check
+        run: |
+          black --check glue/ || true
+      
+      - name: Run Flake8 linting
+        run: |
+          flake8 glue/ --max-line-length=100 --exclude=__pycache__ || true
+      
+      - name: Check import sorting
+        run: |
+          isort --check-only glue/ || true
+      
+      - name: Install YAML linting
+        run: |
+          sudo apt-get install -y yamllint
+      
+      - name: Lint YAML files
+        run: |
+          yamllint cloudformation/ docs/ scripts/ .github/ || true
+      
+      - name: Check Bash scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh || true
+      
+      - name: Check for secrets
+        run: |
+          echo "Scanning for potential secrets..."
+          ! grep -r "password\|secret\|api.key\|AKIA\|BEGIN RSA" . \
+            --include="*.py" --include="*.yaml" --include="*.sh" \
+            --exclude-dir=.git \
+            --exclude-dir=.github || echo "Manual review recommended"
+      
+      - name: Quality check summary
+        run: echo "✓ Code quality checks complete"

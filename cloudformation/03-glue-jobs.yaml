@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for AWS Glue jobs and catalog'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+  DataLakeBucketName:
+    Type: String
+    Description: S3 bucket name for data lake
+    Export: DataLakeBucketName
+
+  RDSEndpoint:
+    Type: String
+    Description: RDS database endpoint
+    Export: RDSEndpoint
+
+  RDSDatabase:
+    Type: String
+    Default: warehousedb
+    Description: RDS database name
+
+  RDSUsername:
+    Type: String
+    Default: admin
+    Description: RDS master username
+    NoEcho: true
+
+  RDSPassword:
+    Type: String
+    Description: RDS master password
+    NoEcho: true
+
+Resources:
+  # Glue Service Role
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'GlueServiceRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}/*'
+        - PolicyName: GlueLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: GlueCatalogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'glue:*'
+                Resource: '*'
+
+  # Glue Database
+  GlueCatalogDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub 'warehouse_db_${Environment}'
+        Description: Data warehouse Glue catalog database
+        Parameters:
+          classification: 'parquet'
+
+  # Glue Job for RDS to S3
+  RDSToS3GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'rds-to-s3-${Environment}'
+      Description: Extract data from RDS and load to S3
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${DataLakeBucketName}/glue-scripts/rds-to-s3.py'
+        PythonVersion: '3'
+      MaxRetries: 0
+      Timeout: 2880
+      DefaultArguments:
+        '--job-bookmark-option': job-bookmark-enable
+        '--TempDir': !Sub 's3://${DataLakeBucketName}/temp/'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${DataLakeBucketName}/logs/spark-logs/'
+        '--enable-job-insights': 'true'
+        '--enable-glue-datacatalog': 'true'
+        '--RDS_ENDPOINT': !Ref RDSEndpoint
+        '--RDS_DATABASE': !Ref RDSDatabase
+        '--RDS_USERNAME': !Ref RDSUsername
+        '--RDS_PASSWORD': !Ref RDSPassword
+        '--S3_BUCKET': !Ref DataLakeBucketName
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      Tags:
+        Environment: !Ref Environment
+
+  # Glue Job for S3 Processing
+  S3ProcessingGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 's3-processing-${Environment}'
+      Description: Process and transform data in S3
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${DataLakeBucketName}/glue-scripts/s3-processing.py'
+        PythonVersion: '3'
+      MaxRetries: 1
+      Timeout: 2880
+      DefaultArguments:
+        '--job-bookmark-option': job-bookmark-enable
+        '--TempDir': !Sub 's3://${DataLakeBucketName}/temp/'
+        '--enable-spark-ui': 'true'
+        '--S3_BUCKET': !Ref DataLakeBucketName
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      Tags:
+        Environment: !Ref Environment
+
+  # Glue Job for S3 to Redshift
+  S3ToRedshiftGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 's3-to-redshift-${Environment}'
+      Description: Load processed data from S3 to Redshift
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${DataLakeBucketName}/glue-scripts/s3-to-redshift.py'
+        PythonVersion: '3'
+      MaxRetries: 1
+      Timeout: 2880
+      DefaultArguments:
+        '--job-bookmark-option': job-bookmark-enable
+        '--TempDir': !Sub 's3://${DataLakeBucketName}/temp/'
+        '--enable-spark-ui': 'true'
+        '--S3_BUCKET': !Ref DataLakeBucketName
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Tags:
+        Environment: !Ref Environment
+
+  # Glue Crawler for RDS
+  RDSCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub 'rds-crawler-${Environment}'
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueCatalogDatabase
+      CatalogTargets:
+        - ConnectionName: !Ref RDSConnection
+          Tables:
+            - '*'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # Glue Crawler for S3
+  S3Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub 's3-crawler-${Environment}'
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueCatalogDatabase
+      S3Targets:
+        - Path: !Sub 's3://${DataLakeBucketName}/processed/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # RDS Connection for Glue
+  RDSConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub 'rds-connection-${Environment}'
+        Description: Connection to RDS PostgreSQL database
+        ConnectionType: JDBC
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SecurityGroupIdList: []
+          SubnetId: ''
+        ConnectionProperties:
+          JDBC_DRIVER_JAR_URI: 's3://aws-glue-scripts-${AWS::AccountId}-${AWS::Region}/PostgreSQL/postgresql-42.5.0.jar'
+          JDBC_URL: !Sub 'jdbc:postgresql://${RDSEndpoint}:5432/${RDSDatabase}'
+          SECRET_ID: !Ref RDSConnectionSecret
+          username: !Ref RDSUsername
+
+  # Secrets Manager secret for RDS credentials
+  RDSConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'rds-glue-connection-${Environment}'
+      Description: RDS credentials for Glue
+      SecretString: !Sub |
+        {
+          "username": "${RDSUsername}",
+          "password": "${RDSPassword}"
+        }
+
+Outputs:
+  GlueRoleArn:
+    Description: ARN of Glue Service Role
+    Value: !GetAtt GlueServiceRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-role-arn'
+
+  GlueDatabaseName:
+    Description: Glue Catalog Database Name
+    Value: !Ref GlueCatalogDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-database-name'
+
+  RDSToS3JobName:
+    Description: RDS to S3 Glue Job Name
+    Value: !Ref RDSToS3GlueJob
+    Export:
+      Name: !Sub '${AWS::StackName}-rds-to-s3-job'
+
+  S3ProcessingJobName:
+    Description: S3 Processing Glue Job Name
+    Value: !Ref S3ProcessingGlueJob
+    Export:
+      Name: !Sub '${AWS::StackName}-s3-processing-job'
+
+  S3ToRedshiftJobName:
+    Description: S3 to Redshift Glue Job Name
+    Value: !Ref S3ToRedshiftGlueJob
+    Export:
+      Name: !Sub '${AWS::StackName}-s3-to-redshift-job'

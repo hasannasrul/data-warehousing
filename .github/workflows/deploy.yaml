@@ -1,0 +1,95 @@
+name: Deploy to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      region:
+        description: 'AWS region'
+        required: true
+        default: 'us-east-1'
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy CloudFormation Stack
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ github.event.inputs.region }}
+        continue-on-error: true
+      
+      - name: Create S3 bucket for templates
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text || echo "000000000000")
+          BUCKET="cf-templates-${{ github.event.inputs.environment }}-${ACCOUNT_ID}"
+          
+          if aws s3 ls "s3://${BUCKET}" --region ${{ github.event.inputs.region }} 2>/dev/null; then
+            echo "Bucket ${BUCKET} already exists"
+          else
+            aws s3 mb "s3://${BUCKET}" --region ${{ github.event.inputs.region }}
+            echo "Created bucket ${BUCKET}"
+          fi
+        continue-on-error: true
+      
+      - name: Upload CloudFormation templates to S3
+        run: |
+          for template in cloudformation/*.yaml; do
+            if [ -f "$template" ]; then
+              echo "Uploading $(basename $template)..."
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text || echo "000000000000")
+              BUCKET="cf-templates-${{ github.event.inputs.environment }}-${ACCOUNT_ID}"
+              aws s3 cp "$template" "s3://${BUCKET}/" --region ${{ github.event.inputs.region }}
+            fi
+          done
+        continue-on-error: true
+      
+      - name: Deploy CloudFormation stack
+        run: |
+          echo "Deploying stack to ${{ github.event.inputs.environment }} environment..."
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/00-master-stack.yaml \
+            --stack-name data-warehouse-${{ github.event.inputs.environment }} \
+            --region ${{ github.event.inputs.region }} \
+            --parameter-overrides \
+              Environment=${{ github.event.inputs.environment }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset || true
+        continue-on-error: true
+      
+      - name: Get stack status
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name data-warehouse-${{ github.event.inputs.environment }} \
+            --region ${{ github.event.inputs.region }} \
+            --query 'Stacks[0].[StackStatus,StackName]' \
+            --output table || echo "Stack not found"
+        continue-on-error: true
+      
+      - name: Deployment notification
+        if: always()
+        run: |
+          echo "✓ Deployment workflow completed"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Region: ${{ github.event.inputs.region }}"

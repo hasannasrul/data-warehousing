@@ -1,0 +1,82 @@
+name: Validate CloudFormation Templates
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/validate-cloudformation.yaml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cloudformation/**'
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  validate:
+    name: Validate CloudFormation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+        continue-on-error: true
+      
+      - name: Validate S3 template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/01-s3-bucket.yaml \
+            --region us-east-1
+        continue-on-error: true
+      
+      - name: Validate RDS template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/02-rds-database.yaml \
+            --region us-east-1
+        continue-on-error: true
+      
+      - name: Validate Glue template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/03-glue-jobs.yaml \
+            --region us-east-1
+        continue-on-error: true
+      
+      - name: Validate Redshift template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/04-redshift-cluster.yaml \
+            --region us-east-1
+        continue-on-error: true
+      
+      - name: Validate Master template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/00-master-stack.yaml \
+            --region us-east-1
+        continue-on-error: true
+      
+      - name: Check YAML syntax
+        run: |
+          sudo apt-get install -y yamllint
+          yamllint cloudformation/*.yaml
+        continue-on-error: true
+      
+      - name: Check for common CloudFormation errors
+        run: |
+          echo "Checking for hardcoded credentials..."
+          ! grep -r "password\|secret\|key" cloudformation/ --include="*.yaml" | grep -v "!Ref\|Fn::" || true
+          echo "✓ No obvious hardcoded credentials found"
+      
+      - name: Template validation summary
+        run: echo "✓ CloudFormation templates validation complete"

@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Master CloudFormation template for complete data warehousing solution'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Environment Configuration'
+        Parameters:
+          - Environment
+          - BucketPrefix
+      - Label:
+          default: 'RDS Configuration'
+        Parameters:
+          - RDSInstanceClass
+          - RDSAllocatedStorage
+          - DBUsername
+          - DBPassword
+      - Label:
+          default: 'Redshift Configuration'
+        Parameters:
+          - RedshiftNodeType
+          - RedshiftNumberOfNodes
+          - RedshiftMasterUsername
+          - RedshiftMasterPassword
+    ParameterLabels:
+      Environment:
+        default: 'Environment Name'
+      BucketPrefix:
+        default: 'S3 Bucket Prefix'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name for the deployment
+
+  BucketPrefix:
+    Type: String
+    Default: data-warehouse
+    Description: Prefix for S3 bucket name
+
+  RDSInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium, db.m5.large, db.m5.xlarge]
+    Description: RDS instance type
+
+  RDSAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 65536
+    Description: RDS allocated storage in GB
+
+  DBUsername:
+    Type: String
+    Default: admin
+    MinLength: 1
+    MaxLength: 16
+    Description: RDS master username
+
+  DBPassword:
+    Type: String
+    MinLength: 8
+    MaxLength: 41
+    NoEcho: true
+    Description: RDS master password (min 8 characters)
+
+  RedshiftNodeType:
+    Type: String
+    Default: dc2.large
+    AllowedValues:
+      - dc2.large
+      - dc2.8xlarge
+      - ra3.xlplus
+      - ra3.4xlarge
+      - ra3.16xlarge
+    Description: Redshift node type
+
+  RedshiftNumberOfNodes:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 128
+    Description: Number of Redshift nodes
+
+  RedshiftMasterUsername:
+    Type: String
+    Default: admin
+    Description: Redshift master username
+
+  RedshiftMasterPassword:
+    Type: String
+    MinLength: 8
+    NoEcho: true
+    Description: Redshift master password
+
+Resources:
+  # S3 Data Lake Stack
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      StackName: !Sub 'dw-s3-stack-${Environment}'
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/01-s3-bucket.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        BucketPrefix: !Ref BucketPrefix
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # RDS Database Stack
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: S3Stack
+    Properties:
+      StackName: !Sub 'dw-rds-stack-${Environment}'
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/02-rds-database.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        DBInstanceClass: !Ref RDSInstanceClass
+        AllocatedStorage: !Ref RDSAllocatedStorage
+        DBUsername: !Ref DBUsername
+        DBPassword: !Ref DBPassword
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Glue Jobs Stack
+  GlueStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - S3Stack
+      - RDSStack
+    Properties:
+      StackName: !Sub 'dw-glue-stack-${Environment}'
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/03-glue-jobs.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        DataLakeBucketName: !GetAtt S3Stack.Outputs.DataLakeBucketName
+        RDSEndpoint: !GetAtt RDSStack.Outputs.RDSEndpoint
+        RDSDatabase: warehouse
+        RDSUsername: !Ref DBUsername
+        RDSPassword: !Ref DBPassword
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Redshift Cluster Stack
+  RedshiftStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - S3Stack
+      - GlueStack
+    Properties:
+      StackName: !Sub 'dw-redshift-stack-${Environment}'
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}/04-redshift-cluster.yaml'
+      Parameters:
+        Environment: !Ref Environment
+        NodeType: !Ref RedshiftNodeType
+        NumberOfNodes: !Ref RedshiftNumberOfNodes
+        MasterUsername: !Ref RedshiftMasterUsername
+        MasterUserPassword: !Ref RedshiftMasterPassword
+        DBName: warehouse
+        DataLakeBucketName: !GetAtt S3Stack.Outputs.DataLakeBucketName
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # S3 Bucket for CloudFormation Templates
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cf-templates-${Environment}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  S3StackName:
+    Description: Name of the S3 stack
+    Value: !Ref S3Stack
+    Export:
+      Name: !Sub '${AWS::StackName}-s3-stack'
+
+  S3BucketName:
+    Description: Data Lake S3 Bucket Name
+    Value: !GetAtt S3Stack.Outputs.DataLakeBucketName
+    Export:
+      Name: !Sub '${AWS::StackName}-bucket-name'
+
+  RDSStackName:
+    Description: Name of the RDS stack
+    Value: !Ref RDSStack
+    Export:
+      Name: !Sub '${AWS::StackName}-rds-stack'
+
+  RDSEndpoint:
+    Description: RDS Database Endpoint
+    Value: !GetAtt RDSStack.Outputs.RDSEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-rds-endpoint'
+
+  GlueStackName:
+    Description: Name of the Glue stack
+    Value: !Ref GlueStack
+    Export:
+      Name: !Sub '${AWS::StackName}-glue-stack'
+
+  RedshiftStackName:
+    Description: Name of the Redshift stack
+    Value: !Ref RedshiftStack
+    Export:
+      Name: !Sub '${AWS::StackName}-redshift-stack'
+
+  RedshiftEndpoint:
+    Description: Redshift Cluster Endpoint
+    Value: !GetAtt RedshiftStack.Outputs.RedshiftClusterEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-redshift-endpoint'
+
+  DataFlowArchitecture:
+    Description: Data flow architecture of the solution
+    Value: 'RDS & S3 → Glue Jobs → Redshift Data Warehouse'
+
+  TemplatesBucketName:
+    Description: S3 bucket containing CloudFormation templates
+    Value: !Ref TemplatesBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-templates-bucket'

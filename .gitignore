@@ -1,0 +1,47 @@
+node_modules/
+.env
+.env.local
+*.pem
+*.key
+*.log
+__pycache__/
+.pytest_cache/
+dist/
+build/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.coverage
+htmlcov/
+.mypy_cache/
+*.egg-info/
+
+# AWS
+aws-credentials
+.aws/
+!.aws/config
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary
+tmp/
+temp/
+*.tmp

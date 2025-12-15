@@ -1,0 +1,32 @@
+{
+  "ParameterKey": "Environment",
+  "ParameterValue": "dev"
+}
+{
+  "ParameterKey": "BucketPrefix",
+  "ParameterValue": "data-warehouse"
+}
+{
+  "ParameterKey": "RDSInstanceClass",
+  "ParameterValue": "db.t3.micro"
+}
+{
+  "ParameterKey": "RDSAllocatedStorage",
+  "ParameterValue": "20"
+}
+{
+  "ParameterKey": "DBUsername",
+  "ParameterValue": "admin"
+}
+{
+  "ParameterKey": "RedshiftNodeType",
+  "ParameterValue": "dc2.large"
+}
+{
+  "ParameterKey": "RedshiftNumberOfNodes",
+  "ParameterValue": "2"
+}
+{
+  "ParameterKey": "RedshiftMasterUsername",
+  "ParameterValue": "admin"
+}

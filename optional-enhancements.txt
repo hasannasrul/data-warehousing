@@ -1,0 +1,6 @@
+Monitoring Dashboard - CloudWatch dashboard template
+Lambda Functions - For orchestrating Glue jobs
+Step Functions - For complex ETL workflows
+Unit Tests - For Glue scripts validation
+CI/CD Pipeline - GitHub Actions/CodePipeline templates
+Data Quality Rules - Great Expectations or custom validation

@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Amazon Redshift cluster'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+  ClusterIdentifier:
+    Type: String
+    Default: warehouse-cluster
+    Description: Redshift cluster identifier
+
+  NodeType:
+    Type: String
+    Default: dc2.large
+    AllowedValues:
+      - dc2.large
+      - dc2.8xlarge
+      - ra3.xlplus
+      - ra3.4xlarge
+      - ra3.16xlarge
+    Description: Node type for Redshift cluster
+
+  NumberOfNodes:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 128
+    Description: Number of nodes in the cluster
+
+  MasterUsername:
+    Type: String
+    Default: admin
+    MinLength: 1
+    MaxLength: 128
+    Description: Master username for Redshift
+
+  MasterUserPassword:
+    Type: String
+    MinLength: 8
+    NoEcho: true
+    Description: Master user password (min 8 characters, must include uppercase, lowercase, number, symbol)
+
+  DBName:
+    Type: String
+    Default: warehouse
+    MinLength: 1
+    MaxLength: 64
+    Description: Database name
+
+  DataLakeBucketName:
+    Type: String
+    Description: S3 bucket name for data lake
+
+Resources:
+  # Security Group for Redshift
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Redshift cluster
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: 0.0.0.0/0
+          Description: Redshift port
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Redshift
+
+  # IAM Role for Redshift
+  RedshiftRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'RedshiftRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess'
+      Policies:
+        - PolicyName: RedshiftS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}/*'
+        - PolicyName: RedshiftGlueAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:GetPartitions'
+                Resource: '*'
+        - PolicyName: RedshiftSecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+
+  # Redshift Cluster Parameter Group
+  RedshiftParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: Parameter group for Redshift cluster
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+        enable_user_activity_logging: 'true'
+        log_min_duration_statement: 1000
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Redshift Cluster
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    DeletionPolicy: Snapshot
+    Properties:
+      ClusterIdentifier: !Sub '${ClusterIdentifier}-${Environment}'
+      NodeType: !Ref NodeType
+      NumberOfNodes: !Ref NumberOfNodes
+      DBName: !Ref DBName
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterUserPassword
+      VpcSecurityGroupIds:
+        - !Ref RedshiftSecurityGroup
+      ClusterParameterGroupName: !Ref RedshiftParameterGroup
+      IamRoles:
+        - !GetAtt RedshiftRole.Arn
+      AllowVersionUpgrade: true
+      AutomatedSnapshotRetentionPeriod: 7
+      PreferredMaintenanceWindow: 'mon:03:00-mon:04:00'
+      PubliclyAccessible: true
+      LoggingProperties:
+        BucketName: !Ref DataLakeBucketName
+        S3KeyPrefix: logs/redshift-logs/
+      EnableLoggingToCloudwatch: true
+      CloudwatchLogsLogGroupArn: !GetAtt RedshiftLogsGroup.Arn
+      CloudwatchLogsRoleArn: !GetAtt RedshiftCloudWatchLogsRole.Arn
+      EnhancedVpcRouting: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DataWarehouse
+
+  # CloudWatch Logs Group for Redshift
+  RedshiftLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/redshift/cluster/${ClusterIdentifier}-${Environment}'
+      RetentionInDays: 30
+
+  # IAM Role for CloudWatch Logs
+  RedshiftCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RedshiftCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !GetAtt RedshiftLogsGroup.Arn
+
+  # Redshift Subnet Group
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group for Redshift cluster
+      SubnetIds:
+        - !Ref AWS::StackName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Secrets Manager Secret for Redshift
+  RedshiftSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'redshift-credentials-${Environment}'
+      Description: Redshift cluster credentials
+      SecretString: !Sub |
+        {
+          "username": "${MasterUsername}",
+          "password": "${MasterUserPassword}",
+          "engine": "redshift",
+          "host": "${RedshiftCluster.Endpoint.Address}",
+          "port": 5439,
+          "dbClusterIdentifier": "${ClusterIdentifier}-${Environment}"
+        }
+
+Outputs:
+  RedshiftClusterEndpoint:
+    Description: Redshift cluster endpoint
+    Value: !GetAtt RedshiftCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-endpoint'
+
+  RedshiftClusterPort:
+    Description: Redshift cluster port
+    Value: !GetAtt RedshiftCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-port'
+
+  RedshiftDatabase:
+    Description: Redshift database name
+    Value: !Ref DBName
+    Export:
+      Name: !Sub '${AWS::StackName}-database'
+
+  RedshiftSecurityGroupId:
+    Description: Redshift Security Group ID
+    Value: !Ref RedshiftSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-sg-id'
+
+  RedshiftRoleArn:
+    Description: ARN of Redshift IAM role
+    Value: !GetAtt RedshiftRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-role-arn'
+
+  RedshiftSecretArn:
+    Description: ARN of Redshift Secret in Secrets Manager
+    Value: !Ref RedshiftSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-secret-arn'
