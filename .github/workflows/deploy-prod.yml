@@ -82,7 +82,7 @@ jobs:
           echo "Time: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       
       - name: Upload deployment log
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: prod-deployment-log

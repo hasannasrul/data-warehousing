@@ -92,7 +92,7 @@ jobs:
           cat deployment-report.md
       
       - name: Upload deployment report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: deployment-report
