@@ -35,7 +35,7 @@ moto==4.2.11  # AWS mocking
 # Development
 black==23.12.1
 flake8==7.0.0
-pylint==3.0.3
+pylint==4.0.4
 
 # Optional: Database drivers if using for metadata
 psycopg2-binary==2.9.9  # PostgreSQL
