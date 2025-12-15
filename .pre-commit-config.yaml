@@ -15,7 +15,7 @@ repos:
     rev: v1.33.0
     hooks:
       - id: yamllint
-        args: [--strict, -d '{extends: default, rules: {line-length: {max: 120}}}']
+        args: ['--strict', '-d', '{extends: default, rules: {line-length: {max: 120}}}']
 
   - repo: https://github.com/psf/black
     rev: 23.12.0
