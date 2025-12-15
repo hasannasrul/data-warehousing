@@ -28,7 +28,7 @@ pytz==2023.3
 watchtower==3.0.1
 
 # Testing
-pytest==7.4.3
+pytest==9.0.2
 pytest-cov==4.1.0
 moto==4.2.11  # AWS mocking
 
